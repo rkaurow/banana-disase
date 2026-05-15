@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Banana Doctor AI - Admin Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/styles_v2.css?v=2">
+</head>
+<body>
+    <div class="bg-glow bg-glow-left"></div>
+    <div class="bg-glow bg-glow-right"></div>
+
+    <div class="container">
+        <header class="header glass-card">
+            <div class="logo">🍌 Banana Doctor <span>AI Panel</span></div>
+            <nav>
+                <button class="nav-btn active" id="nav-dashboard">Dashboard</button>
+                <a href="/docs" target="_blank" class="nav-btn" style="text-decoration: none;">API Docs</a>
+            </nav>
+        </header>
+
+        <main class="main-content">
+            <section class="hero-section">
+                <div class="hero-content">
+                    <div class="hero-badge">AI-Powered Computer Vision</div>
+                    <h1 class="hero-title">Sistem Cerdas Pendeteksi<br><span class="text-accent">Penyakit Daun Pisang</span></h1>
+                    <p class="hero-subtitle">
+                        Unggah foto daun pisang Anda dan biarkan AI kami menganalisa tingkat kesehatan, mengidentifikasi penyakit, serta memberikan detail 5 poin saran penanganan secara instan.
+                    </p>
+                    <div class="hero-actions">
+                        <button class="btn btn-primary btn-large" id="btn-start-detect">Mulai Deteksi Sekarang</button>
+                        <a href="/docs" target="_blank" class="btn btn-secondary btn-large">Lihat Dokumentasi API</a>
+                    </div>
+                </div>
+            </section>
+
+            <section class="upload-section glass-card" id="upload-section">
+                <div class="section-title">Upload Gambar Daun</div>
+                <div class="drop-zone" id="drop-zone">
+                    <div class="drop-zone-text">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p>Tarik & Letakkan gambar di sini atau klik untuk mencari</p>
+                    </div>
+                    <input type="file" id="file-input" accept="image/*" hidden>
+                    <img id="preview-image" src="" alt="Preview" style="display: none;">
+                </div>
+                <button class="btn btn-primary" id="analyze-btn" disabled>Analisa Sekarang</button>
+                <div class="loading-overlay" id="loading-overlay" style="display: none;">
+                    <div class="scanner-container">
+                        <div class="scanning-line"></div>
+                        <div class="spinner"></div>
+                    </div>
+                    <p>Processing Image...</p>
+                </div>
+            </section>
+
+            <div class="dashboard-grid" id="results-container" style="display: none;">
+                <!-- Top Row: Overview -->
+                <div class="dash-card overview-card glass-card">
+                    <div class="overview-header">
+                        <div class="result-eyebrow">HASIL DIAGNOSA AI</div>
+                        <h2 class="result-headline" id="res-headline">Memuat...</h2>
+                        <p class="result-summary" id="res-summary"></p>
+                    </div>
+                    
+                    <div class="overview-stats">
+                        <div class="circular-chart-container">
+                            <svg viewBox="0 0 36 36" class="circular-chart">
+                                <path class="circle-bg"
+                                    d="M18 2.0845
+                                    a 15.9155 15.9155 0 0 1 0 31.831
+                                    a 15.9155 15.9155 0 0 1 0 -31.831"
+                                />
+                                <path class="circle" id="confidence-circle"
+                                    stroke-dasharray="0, 100"
+                                    d="M18 2.0845
+                                    a 15.9155 15.9155 0 0 1 0 31.831
+                                    a 15.9155 15.9155 0 0 1 0 -31.831"
+                                />
+                                <text x="18" y="20.35" class="percentage" id="res-confidence">0%</text>
+                            </svg>
+                            <div class="chart-label">Tingkat Keyakinan</div>
+                        </div>
+                        
+                        <div class="side-metrics">
+                            <div class="metric-box warning-box">
+                                <span class="icon">⚠️</span>
+                                <div class="m-info">
+                                    <span class="m-label">Keparahan</span>
+                                    <span class="m-value" id="res-severity">-</span>
+                                </div>
+                            </div>
+                            <div class="metric-box info-box">
+                                <span class="icon">🧬</span>
+                                <div class="m-info">
+                                    <span class="m-label">Label Asli</span>
+                                    <span class="m-value" id="res-label">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bottom Row: Advice & Chat -->
+                <div class="dash-bottom">
+                    <div class="dash-card advice-card glass-card">
+                        <h3 class="card-title"><span class="icon">🛡️</span> Tindakan yang Disarankan</h3>
+                        <div class="advice-content">
+                            <ul class="modern-list" id="res-actions"></ul>
+                        </div>
+                    </div>
+
+                    <div class="dash-card chat-card glass-card">
+                        <h3 class="card-title">🤖 Asisten AI Pribadi</h3>
+                        <div class="chat-window" id="chat-window">
+                            <!-- Pesan akan muncul di sini -->
+                        </div>
+                        <div class="chat-input-area">
+                            <input type="text" id="chat-input" placeholder="Tanyakan seputar hasil diagnosa...">
+                            <button id="send-chat-btn" title="Kirim Pesan">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/js/app_v2.js?v=3"></script>
+</body>
+</html>

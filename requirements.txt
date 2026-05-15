@@ -1,0 +1,10 @@
+tensorflow==2.16.2
+numpy==1.26.4
+pandas==2.3.3
+Pillow==12.1.0
+streamlit==1.53.1
+scikit-learn==1.8.0
+openai==1.70.0
+matplotlib==3.8.4
+seaborn==0.13.2
+tomli==2.2.1; python_version < "3.11"
