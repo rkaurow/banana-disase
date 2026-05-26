@@ -8,7 +8,9 @@ from PIL import Image
 from src.inference import load_artifacts, predict_image, DISEASE_INFO
 from src.ai_response import generate_disease_response, chat_with_bot
 
-app = FastAPI(title="Banana Disease API")
+import os
+root_path = os.getenv("ROOT_PATH", "")
+app = FastAPI(title="Banana Disease API", root_path=root_path)
 
 # Load artifacts on startup
 artifacts, error_msg = load_artifacts()
