@@ -1,11 +1,13 @@
 import os
 import json
 import ssl
+import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, callbacks
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from pathlib import Path
+from sklearn.utils.class_weight import compute_class_weight
 
 # Fix SSL Certificate Error on macOS
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -81,6 +83,19 @@ def train_model():
         json.dump(labels, f)
     print(f"Labels disimpan: {labels}")
 
+    # === Hitung class weight (dataset tidak seimbang) ===
+    # Healthy=1001, Cordana=342, Panama=835, Sigatoka=2497 -> model bias ke Sigatoka.
+    # class_weight membuat loss kelas minoritas (Healthy, Cordana) lebih besar.
+    class_indices = train_generator.class_indices
+    y_train = train_generator.classes
+    class_weights_array = compute_class_weight(
+        class_weight="balanced",
+        classes=np.unique(y_train),
+        y=y_train,
+    )
+    class_weight = {i: float(w) for i, w in enumerate(class_weights_array)}
+    print(f"Class weights: { {labels[i]: round(w, 3) for i, w in class_weight.items()} }")
+
     # Base Model
     base_model = tf.keras.applications.MobileNetV2(
         input_shape=(224, 224, 3),
@@ -99,7 +114,7 @@ def train_model():
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss='categorical_crossentropy',
+        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy']
     )
 
@@ -126,6 +141,7 @@ def train_model():
         train_generator,
         epochs=INITIAL_EPOCHS,
         validation_data=validation_generator,
+        class_weight=class_weight,
         callbacks=[checkpoint, early_stop, reduce_lr]
     )
     plot_history(history, "history_phase1.png")
@@ -138,8 +154,8 @@ def train_model():
         layer.trainable = False
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5), # LR sangat kecil untuk fine-tuning
-        loss='categorical_crossentropy',
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),  # LR sangat kecil untuk fine-tuning
+        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy']
     )
 
@@ -147,6 +163,7 @@ def train_model():
         train_generator,
         epochs=FINE_TUNE_EPOCHS,
         validation_data=validation_generator,
+        class_weight=class_weight,
         callbacks=[checkpoint, early_stop, reduce_lr]
     )
     plot_history(history_fine, "history_phase2.png")

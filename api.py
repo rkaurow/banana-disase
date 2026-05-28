@@ -50,13 +50,39 @@ async def predict(file: UploadFile = File(...)):
         })
         prediction["disease_info"] = disease
 
-        # Generate AI response
-        try:
-            ai_response = generate_disease_response(prediction)
-            prediction["ai_response"] = ai_response
-        except Exception as e:
-            print(f"Error generating AI response: {e}")
-            prediction["ai_response"] = None
+        # Generate AI response (skip kalau bukan daun pisang -> hemat token & cegah jawaban ngaco)
+        if prediction.get("is_banana_leaf") is False:
+            prediction["ai_response"] = {
+                "headline": "Bukan Daun Pisang",
+                "summary": (
+                    "Sistem mendeteksi bahwa gambar yang Anda unggah kemungkinan besar "
+                    "bukan daun pisang. Mohon unggah ulang foto daun pisang yang jelas."
+                ),
+                "meaning": (
+                    "Model deteksi penyakit ini hanya dilatih untuk daun pisang. "
+                    "Gambar lain (tangan, wajah, benda, daun tanaman lain) tidak dapat dianalisa."
+                ),
+                "actions": [
+                    "Ambil foto daun pisang dari jarak dekat (30-60 cm).",
+                    "Pastikan seluruh helai daun terlihat dan fokus.",
+                    "Gunakan pencahayaan alami yang cukup, hindari bayangan keras.",
+                    "Hindari memotret tangan, wajah, atau objek selain daun pisang.",
+                    "Coba beberapa sudut: atas daun, bawah daun, dan area yang dicurigai sakit.",
+                ],
+                "prevention": [
+                    "Selalu verifikasi objek pada foto sebelum unggah.",
+                    "Bersihkan lensa kamera agar gambar tidak buram.",
+                    "Gunakan satu daun per foto untuk hasil terbaik.",
+                ],
+                "warning": "Hasil ini bukan diagnosis penyakit — silakan unggah ulang foto daun pisang.",
+            }
+        else:
+            try:
+                ai_response = generate_disease_response(prediction)
+                prediction["ai_response"] = ai_response
+            except Exception as e:
+                print(f"Error generating AI response: {e}")
+                prediction["ai_response"] = None
 
         return prediction
 

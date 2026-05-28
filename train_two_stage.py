@@ -2,11 +2,13 @@ import os
 import json
 import ssl
 import shutil
+import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, callbacks
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from pathlib import Path
+from sklearn.utils.class_weight import compute_class_weight
 
 # Fix SSL
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -28,7 +30,7 @@ def plot_history(history, filename):
     plt.savefig(ARTIFACTS_PATH / filename)
     plt.close()
 
-def build_model(num_classes):
+def build_model(num_classes, label_smoothing=0.0):
     base_model = tf.keras.applications.MobileNetV2(input_shape=(224, 224, 3), include_top=False, weights='imagenet')
     base_model.trainable = False
     model = models.Sequential([
@@ -38,8 +40,18 @@ def build_model(num_classes):
         layers.Dropout(0.3),
         layers.Dense(num_classes, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing)
+    model.compile(optimizer='adam', loss=loss, metrics=['accuracy'])
     return model, base_model
+
+
+def _compute_class_weight(generator):
+    y = generator.classes
+    weights = compute_class_weight(class_weight="balanced", classes=np.unique(y), y=y)
+    cw = {i: float(w) for i, w in enumerate(weights)}
+    labels = list(generator.class_indices.keys())
+    print(f"Class weights: { {labels[i]: round(w, 3) for i, w in cw.items()} }")
+    return cw
 
 def train_binary():
     print("\n--- Training Stage 1: Binary (Healthy vs Diseased) ---")
@@ -65,8 +77,17 @@ def train_binary():
     train_gen = datagen.flow_from_directory(temp_dir, target_size=IMAGE_SIZE, batch_size=BATCH_SIZE, subset='training')
     val_gen = datagen.flow_from_directory(temp_dir, target_size=IMAGE_SIZE, batch_size=BATCH_SIZE, subset='validation')
 
-    model, _ = build_model(2)
-    history = model.fit(train_gen, epochs=10, validation_data=val_gen, verbose=1)
+    # Healthy (~1001) jauh lebih sedikit dari Diseased (~3674) -> wajib pakai class_weight
+    class_weight = _compute_class_weight(train_gen)
+
+    model, _ = build_model(2, label_smoothing=0.05)
+    history = model.fit(
+        train_gen,
+        epochs=10,
+        validation_data=val_gen,
+        class_weight=class_weight,
+        verbose=1,
+    )
     
     model.save(ARTIFACTS_PATH / "binary_model.keras")
     with open(ARTIFACTS_PATH / "binary_labels.json", "w") as f:
@@ -90,8 +111,15 @@ def train_diseased_only():
     val_gen = datagen.flow_from_directory(temp_dir, target_size=IMAGE_SIZE, batch_size=BATCH_SIZE, subset='validation')
 
     labels = list(train_gen.class_indices.keys())
-    model, _ = build_model(len(labels))
-    history = model.fit(train_gen, epochs=15, validation_data=val_gen, verbose=1)
+    class_weight = _compute_class_weight(train_gen)
+    model, _ = build_model(len(labels), label_smoothing=0.05)
+    history = model.fit(
+        train_gen,
+        epochs=15,
+        validation_data=val_gen,
+        class_weight=class_weight,
+        verbose=1,
+    )
     
     model.save(ARTIFACTS_PATH / "disease_model.keras")
     with open(ARTIFACTS_PATH / "disease_labels.json", "w") as f:

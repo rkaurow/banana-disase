@@ -6,6 +6,7 @@ __pycache__/
 env/
 venv/
 ENV/
+/datasets
 
 # Environment variables
 .env
@@ -16,7 +17,11 @@ ENV/
 __MACOSX/
 
 # Artifacts/Models
-artifacts/
+# Ignore semua artifacts, kecuali file model & label yang dibutuhkan server untuk inference.
+artifacts/*
+!artifacts/
+!artifacts/*.keras
+!artifacts/*.json
 *.h5
 *.pth
 *.pt
