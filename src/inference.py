@@ -20,22 +20,37 @@ IMAGE_SIZE = 224
 NOT_BANANA_LABEL = "Not Banana Leaf"
 
 # Ambang batas untuk Out-Of-Distribution detection.
-# - OOD_PLANT_SCORE_MIN: total skor kelas-kelas "tumbuhan/daun" pada ImageNet harus >= nilai ini.
-# - OOD_MIN_CONFIDENCE: jika model pisang sangat tidak yakin (< threshold), anggap bukan daun pisang.
-OOD_PLANT_SCORE_MIN = 0.15
-OOD_MIN_CONFIDENCE = 0.45
+# Strategi: BLOKIR hanya jika ada sinyal kuat "jelas bukan tumbuhan" (tangan, wajah, kendaraan, dll).
+# Pendekatan positif (cari bukti IS plant) terlalu sering false-positive pada daun pisang
+# yang difoto dari sudut tidak biasa atau dengan background tanah.
+#
+# OOD_NON_PLANT_BLOCK: jika total skor kelas "jelas bukan tumbuhan" >= nilai ini -> blokir.
+# OOD_MIN_CONFIDENCE: jika model pisang sangat tidak yakin DAN skor non-plant cukup tinggi -> blokir.
+OOD_NON_PLANT_BLOCK = 0.60   # Harus sangat yakin bukan tumbuhan sebelum blokir
+OOD_MIN_CONFIDENCE  = 0.30   # Confidence minimum model pisang (pelengkap, bukan penentu utama)
 
-# Kata kunci kelas ImageNet (1000 kelas) yang mengindikasikan tumbuhan, daun, buah, bunga, dll.
-# Kalau top-K prediksi ImageNet jatuh pada salah satu kata kunci ini -> gambar kemungkinan tumbuhan.
-_PLANT_KEYWORDS = (
-    "banana", "leaf", "leaves", "plant", "tree", "flower", "fern", "palm",
-    "fig", "fruit", "vegetable", "cabbage", "lettuce", "broccoli", "artichoke",
-    "corn", "maize", "ear", "pineapple", "cucumber", "spinach", "cardoon",
-    "moss", "mushroom", "fungus", "agaric", "yucca", "daisy", "bonsai",
-    "vine", "grass", "hay", "pot", "flowerpot", "buckeye", "acorn", "rapeseed",
-    "stinkhorn", "earthstar", "coral fungus", "hen-of-the-woods", "bolete",
-    "head cabbage", "bell pepper", "zucchini", "butternut squash", "acorn squash",
-    "spaghetti squash",
+# Kata kunci kelas ImageNet yang JELAS bukan tumbuhan/alam.
+# Gambar dengan top-K ImageNet didominasi kelas ini -> blokir.
+_NON_PLANT_KEYWORDS = (
+    # Manusia & tubuh
+    "hand", "face", "head", "neck", "arm", "leg", "foot", "finger", "thumb",
+    "person", "people", "man", "woman", "boy", "girl", "child", "baby",
+    "mask", "stocking", "sock", "shoe", "sneaker", "sandal", "boot",
+    # Kendaraan
+    "car", "truck", "bus", "bicycle", "motorcycle", "airplane", "ship", "boat",
+    "van", "jeep", "ambulance", "minivan", "taxicab", "limousine",
+    # Elektronik & peralatan
+    "phone", "mobile", "laptop", "computer", "keyboard", "mouse", "monitor",
+    "television", "remote", "camera", "refrigerator", "microwave", "toaster",
+    # Hewan (bukan relevan untuk diagnosis daun)
+    "dog", "cat", "bird", "fish", "horse", "cow", "pig", "sheep", "monkey",
+    "snake", "lizard", "frog", "spider", "insect", "bee", "ant",
+    # Makanan olahan / non-natural
+    "pizza", "burger", "hot dog", "sandwich", "ice cream", "cake", "bread",
+    "noodle", "sushi", "taco", "burrito",
+    # Furnitur & bangunan
+    "chair", "table", "desk", "sofa", "bed", "door", "window", "wall", "floor",
+    "building", "house", "tower", "bridge",
 )
 
 _ood_backbone: tf.keras.Model | None = None
@@ -56,8 +71,9 @@ def _get_ood_backbone() -> tf.keras.Model | None:
     return _ood_backbone
 
 
-def _imagenet_plant_score(image: Image.Image) -> float | None:
-    """Total probabilitas top-10 ImageNet yang termasuk kategori tumbuhan/daun.
+def _imagenet_non_plant_score(image: Image.Image) -> float | None:
+    """Total probabilitas top-20 ImageNet yang termasuk kelas 'jelas bukan tumbuhan'.
+    Tinggi (>0.60) berarti gambar hampir pasti bukan daun/tumbuhan.
     Mengembalikan None jika backbone gagal dimuat."""
     model = _get_ood_backbone()
     if model is None:
@@ -66,16 +82,16 @@ def _imagenet_plant_score(image: Image.Image) -> float | None:
     arr = tf.keras.applications.mobilenet_v2.preprocess_input(arr)
     arr = np.expand_dims(arr, axis=0)
     preds = model.predict(arr, verbose=0)
-    decoded = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=10)[0]
+    decoded = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=20)[0]
     score = 0.0
     for _, name, prob in decoded:
         n = name.lower()
-        if any(k in n for k in _PLANT_KEYWORDS):
+        if any(k in n for k in _NON_PLANT_KEYWORDS):
             score += float(prob)
     return score
 
 
-def _not_banana_payload(reason: str, plant_score: float | None, confidence: float | None) -> dict[str, object]:
+def _not_banana_payload(reason: str, non_plant_score: float | None, confidence: float | None) -> dict[str, object]:
     return {
         "label": NOT_BANANA_LABEL,
         "confidence": float(confidence) if confidence is not None else 0.0,
@@ -84,7 +100,7 @@ def _not_banana_payload(reason: str, plant_score: float | None, confidence: floa
         "diseased_probability": None,
         "is_banana_leaf": False,
         "ood_reason": reason,
-        "ood_plant_score": plant_score,
+        "ood_non_plant_score": non_plant_score,
         "mode": "ood",
     }
 
@@ -166,12 +182,15 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
 
 def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str, object]:
     # === Stage 0: Out-Of-Distribution check ===
-    # Kalau gambar bukan daun/tumbuhan (tangan, wajah, mobil, dll), short-circuit di sini.
-    plant_score = _imagenet_plant_score(image)
-    if plant_score is not None and plant_score < OOD_PLANT_SCORE_MIN:
+    # Hanya blokir jika ImageNet sangat yakin gambar ini adalah objek NON-tumbuhan
+    # (tangan, wajah, kendaraan, elektronik, dll).
+    # TIDAK blokir hanya karena skor "plant" rendah — daun pisang dari sudut miring
+    # atau dengan background tanah sering mendapat skor plant rendah dari ImageNet.
+    non_plant_score = _imagenet_non_plant_score(image)
+    if non_plant_score is not None and non_plant_score >= OOD_NON_PLANT_BLOCK:
         return _not_banana_payload(
-            reason=f"plant_score {plant_score:.2f} < {OOD_PLANT_SCORE_MIN}",
-            plant_score=plant_score,
+            reason=f"non_plant_score {non_plant_score:.2f} >= {OOD_NON_PLANT_BLOCK}",
+            non_plant_score=non_plant_score,
             confidence=None,
         )
 
@@ -198,15 +217,15 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
             if predicted_label == healthy_class
             else diseased_probability * disease_probability
         )
-        # Kalau dua model sama-sama tidak yakin -> kemungkinan bukan daun pisang.
+        # Lapis kedua: model pisang sangat tidak yakin DAN non_plant_score cukup tinggi -> blokir.
         if (
-            plant_score is not None
+            non_plant_score is not None
             and final_confidence < OOD_MIN_CONFIDENCE
-            and plant_score < OOD_PLANT_SCORE_MIN * 2
+            and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
         ):
             return _not_banana_payload(
-                reason=f"low confidence {final_confidence:.2f} + plant_score {plant_score:.2f}",
-                plant_score=plant_score,
+                reason=f"low confidence {final_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
+                non_plant_score=non_plant_score,
                 confidence=final_confidence,
             )
         return {
@@ -216,7 +235,7 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
             "healthy_probability": healthy_probability,
             "diseased_probability": diseased_probability,
             "is_banana_leaf": True,
-            "ood_plant_score": plant_score,
+            "ood_non_plant_score": non_plant_score,
             "mode": "two-stage",
         }
 
@@ -227,13 +246,13 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
     top_indices = np.argsort(predictions)[::-1][:3]
     best_confidence = float(predictions[best_index])
     if (
-        plant_score is not None
+        non_plant_score is not None
         and best_confidence < OOD_MIN_CONFIDENCE
-        and plant_score < OOD_PLANT_SCORE_MIN * 2
+        and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
     ):
         return _not_banana_payload(
-            reason=f"low confidence {best_confidence:.2f} + plant_score {plant_score:.2f}",
-            plant_score=plant_score,
+            reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
+            non_plant_score=non_plant_score,
             confidence=best_confidence,
         )
     return {
@@ -243,6 +262,6 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
         "healthy_probability": None,
         "diseased_probability": None,
         "is_banana_leaf": True,
-        "ood_plant_score": plant_score,
+        "ood_non_plant_score": non_plant_score,
         "mode": "single-stage",
     }
