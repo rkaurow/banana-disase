@@ -177,6 +177,7 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
     rgb_image = image.convert("RGB")
     resized = rgb_image.resize((IMAGE_SIZE, IMAGE_SIZE))
     image_array = np.asarray(resized, dtype=np.float32)
+    image_array = image_array / 255.0  # normalisasi ke [0,1] sesuai rescale=1./255 di training
     image_array = np.expand_dims(image_array, axis=0)
     return image_array
 
