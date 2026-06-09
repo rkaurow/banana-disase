@@ -107,3 +107,8 @@ dmypy.json
 node_modules/
 whatsapp-bot/node_modules/
 whatsapp-bot/auth_info/
+
+kaggle.json
+artifacts.bak/
+artifacts_download.zip
+

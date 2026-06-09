@@ -1,0 +1,25 @@
+{
+  "models": [
+    {
+      "name": "Custom CNN",
+      "file": "model_cnn.keras"
+    },
+    {
+      "name": "ResNet50",
+      "file": "model_resnet.keras"
+    },
+    {
+      "name": "InceptionV3",
+      "file": "model_inception.keras"
+    }
+  ],
+  "input_size": 224,
+  "num_classes": 7,
+  "voting": "soft",
+  "accuracy": {
+    "cnn": 0.9033391915641477,
+    "resnet": 0.6502636203866432,
+    "inception": 0.9015817223198594,
+    "ensemble": 0.9507908611599297
+  }
+}

@@ -15,14 +15,16 @@ SUMOPOD_API_KEY_ENV = "SUMOPOD_API_KEY"
 DEFAULT_BASE_URL = "https://ai.sumopod.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HEALTHY_LABEL = "Healthy"
+HEALTHY_LABEL = "Augmented Banana Healthy Leaf"
 
 LABEL_PROMPT_HINTS = {
-    "Panama Disease": "Fokus pada penyakit layu Fusarium (Panama), risiko penyebaran tanah, pentingnya isolasi, dan pembersihan alat tani.",
-    "Cordana": "Fokus pada bercak daun Cordana, pengaruh kelembapan, dan pentingnya sirkulasi udara di area pisang.",
-    "Yellow Sigatoka": "Fokus pada penyakit bercak daun kuning (Sigatoka), dampak pada hasil buah, dan sanitasi daun tua.",
-    "Black Sigatoka": "Fokus pada Sigatoka Hitam yang lebih agresif, pengurangan kelembapan, dan monitoring penyebaran cepat.",
-    "Healthy": "Fokus pada pemeliharaan rutin, monitoring berkala, dan menjaga kebersihan area kebun.",
+    "Augmented Banana Black Sigatoka Disease": "Fokus pada Sigatoka Hitam yang sangat agresif, pengurangan kelembapan, penggunaan fungisida sistemik, dan monitoring penyebaran cepat.",
+    "Augmented Banana Bract Mosaic Virus Disease": "Fokus pada virus mosaik seludang, pengendalian vektor kutu daun (aphid), pemusnahan tanaman terinfeksi, dan penggunaan bibit bebas virus.",
+    "Augmented Banana Healthy Leaf": "Fokus pada pemeliharaan rutin, monitoring berkala, pemupukan seimbang, dan menjaga kebersihan area kebun.",
+    "Augmented Banana Insect Pest Disease": "Fokus pada identifikasi jenis hama serangga, pengendalian hayati, penggunaan insektisida yang tepat sasaran, dan pembersihan gulma.",
+    "Augmented Banana Moko Disease": "Fokus pada penyakit bakteri Moko (Ralstonia solanacearum), pemusnahan tanaman terinfeksi, desinfeksi alat tani, dan karantina lahan.",
+    "Augmented Banana Panama Disease": "Fokus pada penyakit layu Fusarium (Panama), risiko penyebaran tanah, pentingnya isolasi, penggunaan bibit tahan penyakit, dan pembersihan alat tani.",
+    "Augmented Banana Yellow Sigatoka Disease": "Fokus pada penyakit bercak daun kuning (Sigatoka Kuning), dampak pada hasil buah, sanitasi daun tua, dan aplikasi fungisida protektif.",
 }
 
 

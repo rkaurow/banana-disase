@@ -7,13 +7,12 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 
-MODEL_PATH = Path("artifacts/banana_disease_model.keras")
+# === Model Paths ===
+ENSEMBLE_CONFIG_PATH = Path("artifacts/ensemble_config.json")
 LABELS_PATH = Path("artifacts/labels.json")
-BINARY_MODEL_PATH = Path("artifacts/binary_model.keras")
-BINARY_LABELS_PATH = Path("artifacts/binary_labels.json")
-DISEASE_MODEL_PATH = Path("artifacts/disease_model.keras")
-DISEASE_LABELS_PATH = Path("artifacts/disease_labels.json")
-CONFIG_PATH = Path("artifacts/training_config.json")
+# Fallback single model (backward compat)
+SINGLE_MODEL_PATH = Path("artifacts/banana_disease_model.keras")
+ARTIFACTS_PATH = Path("artifacts")
 IMAGE_SIZE = 224
 
 # Label khusus untuk gambar yang bukan daun pisang (mis. tangan, wajah, objek random).
@@ -105,29 +104,47 @@ def _not_banana_payload(reason: str, non_plant_score: float | None, confidence: 
     }
 
 DISEASE_INFO = {
-    "Panama Disease": {
-        "status": "Terdeteksi Panama Disease (Layu Fusarium)",
+    "Augmented Banana Black Sigatoka Disease": {
+        "status": "Terdeteksi Black Sigatoka (Sigatoka Hitam)",
         "severity": "Tinggi",
-        "info": "Penyakit tanah yang sangat mematikan bagi tanaman pisang, menyebabkan layu permanen.",
-        "treatment": "Isolasi tanaman, jangan memindahkan tanah dari area terinfeksi, dan gunakan bibit bersertifikat.",
+        "info": "Penyakit jamur agresif yang menyebabkan bercak hitam pada daun, mempercepat kematian jaringan daun dan mengurangi hasil panen secara drastis.",
+        "treatment": "Gunakan fungisida sistemik (Propiconazole/Azoxystrobin), sanitasi daun terinfeksi, perbaiki drainase dan sirkulasi udara.",
     },
-    "Cordana": {
-        "status": "Terdeteksi Cordana Leaf Spot",
-        "severity": "Sedang",
-        "info": "Bercak daun berbentuk oval dengan pusat abu-abu yang dapat mengurangi luas fotosintesis.",
-        "treatment": "Kurangi kelembapan, perbaiki sirkulasi udara, dan buang daun yang terinfeksi berat.",
+    "Augmented Banana Bract Mosaic Virus Disease": {
+        "status": "Terdeteksi Bract Mosaic Virus (Virus Mosaik Seludang)",
+        "severity": "Tinggi",
+        "info": "Penyakit virus yang menyebabkan pola mosaik pada seludang bunga dan daun, ditularkan oleh kutu daun (aphid). Dapat menurunkan kualitas buah.",
+        "treatment": "Musnahkan tanaman terinfeksi, kendalikan vektor kutu daun, gunakan bibit bebas virus, dan jaga kebersihan alat pertanian.",
     },
-    "Yellow and Black Sigatoka": {
-        "status": "Terdeteksi Sigatoka (Kuning/Hitam)",
-        "severity": "Sedang - Tinggi",
-        "info": "Penyakit jamur yang menyebabkan garis-garis pada daun dan dapat mematikan jaringan daun dengan cepat.",
-        "treatment": "Sanitasi daun tua, perbaiki drainase, dan pantau penyebaran terutama di musim hujan.",
-    },
-    "Healthy": {
+    "Augmented Banana Healthy Leaf": {
         "status": "Daun Terlihat Sehat",
         "severity": "Rendah",
         "info": "Kondisi daun tampak normal tanpa gejala penyakit yang signifikan.",
         "treatment": "Lanjutkan pemantauan rutin dan pemupukan yang seimbang.",
+    },
+    "Augmented Banana Insect Pest Disease": {
+        "status": "Terdeteksi Kerusakan Hama Serangga",
+        "severity": "Sedang",
+        "info": "Kerusakan daun akibat serangan hama serangga seperti penggulung daun, thrips, atau ulat. Dapat mengurangi luas fotosintesis.",
+        "treatment": "Identifikasi jenis hama spesifik, gunakan insektisida yang sesuai atau pengendalian hayati, dan bersihkan gulma di sekitar tanaman.",
+    },
+    "Augmented Banana Moko Disease": {
+        "status": "Terdeteksi Penyakit Moko",
+        "severity": "Sangat Tinggi",
+        "info": "Penyakit bakteri (Ralstonia solanacearum) yang menyebabkan layu pada tanaman pisang. Sangat menular dan sulit dikendalikan setelah menyebar.",
+        "treatment": "Musnahkan tanaman terinfeksi segera, desinfeksi alat tani, hindari penanaman ulang di lahan yang sama selama minimal 12 bulan, dan gunakan bibit bersertifikat.",
+    },
+    "Augmented Banana Panama Disease": {
+        "status": "Terdeteksi Panama Disease (Layu Fusarium)",
+        "severity": "Sangat Tinggi",
+        "info": "Penyakit tanah yang sangat mematikan (Fusarium oxysporum) bagi tanaman pisang, menyebabkan layu permanen dan tidak ada obat efektif.",
+        "treatment": "Isolasi tanaman, jangan memindahkan tanah dari area terinfeksi, gunakan bibit bersertifikat tahan penyakit, dan pertimbangkan rotasi tanaman.",
+    },
+    "Augmented Banana Yellow Sigatoka Disease": {
+        "status": "Terdeteksi Yellow Sigatoka (Sigatoka Kuning)",
+        "severity": "Sedang - Tinggi",
+        "info": "Penyakit jamur yang menyebabkan garis-garis kuning pada daun dan dapat mematikan jaringan daun. Kurang agresif dibanding Black Sigatoka tetapi tetap merugikan.",
+        "treatment": "Sanitasi daun tua, perbaiki drainase, aplikasi fungisida protektif (Mancozeb/Chlorothalonil), dan pantau penyebaran terutama di musim hujan.",
     },
     "Not Banana Leaf": {
         "status": "Bukan Daun Pisang",
@@ -144,34 +161,47 @@ DISEASE_INFO = {
 }
 
 def load_artifacts() -> tuple[dict[str, object] | None, str | None]:
-    has_two_stage = all(
-        path.exists()
-        for path in [BINARY_MODEL_PATH, BINARY_LABELS_PATH, DISEASE_MODEL_PATH, DISEASE_LABELS_PATH]
-    )
-    if has_two_stage:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
-        all_labels = json.loads(LABELS_PATH.read_text(encoding="utf-8")) if LABELS_PATH.exists() else []
+    """Load model artifacts. Supports ensemble (3 models) and single model fallback."""
+
+    # === Mode Ensemble: 3 model dari ensemble_config.json ===
+    if ENSEMBLE_CONFIG_PATH.exists() and LABELS_PATH.exists():
+        try:
+            config = json.loads(ENSEMBLE_CONFIG_PATH.read_text(encoding="utf-8"))
+            all_labels = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
+
+            models = []
+            model_names = []
+            for model_info in config["models"]:
+                model_path = ARTIFACTS_PATH / model_info["file"]
+                if not model_path.exists():
+                    return None, f"Model ensemble tidak ditemukan: {model_path}"
+                models.append(tf.keras.models.load_model(model_path))
+                model_names.append(model_info["name"])
+
+            print(f"[inference] Ensemble loaded: {model_names}")
+            return {
+                "mode": "ensemble",
+                "models": models,
+                "model_names": model_names,
+                "all_labels": all_labels,
+                "config": config,
+            }, None
+        except Exception as exc:
+            return None, f"Gagal load ensemble: {exc}"
+
+    # === Fallback: Single model ===
+    if SINGLE_MODEL_PATH.exists() and LABELS_PATH.exists():
         return {
-            "mode": "two-stage",
-            "binary_model": tf.keras.models.load_model(BINARY_MODEL_PATH),
-            "binary_labels": json.loads(BINARY_LABELS_PATH.read_text(encoding="utf-8")),
-            "disease_model": tf.keras.models.load_model(DISEASE_MODEL_PATH),
-            "disease_labels": json.loads(DISEASE_LABELS_PATH.read_text(encoding="utf-8")),
-            "healthy_class": config.get("healthy_class", "Healthy"),
-            "diseased_label": config.get("diseased_label", "Diseased"),
-            "all_labels": all_labels,
+            "mode": "single-stage",
+            "model": tf.keras.models.load_model(SINGLE_MODEL_PATH),
+            "all_labels": json.loads(LABELS_PATH.read_text(encoding="utf-8")),
         }, None
 
-    if not MODEL_PATH.exists():
-        return None, f"Model belum ditemukan di {MODEL_PATH}. Latih model pisang terlebih dahulu."
-    if not LABELS_PATH.exists():
-        return None, f"File label belum ditemukan di {LABELS_PATH}."
-
-    return {
-        "mode": "single-stage",
-        "model": tf.keras.models.load_model(MODEL_PATH),
-        "all_labels": json.loads(LABELS_PATH.read_text(encoding="utf-8")),
-    }, None
+    return None, (
+        f"Model belum ditemukan. Letakkan model ensemble di {ARTIFACTS_PATH} "
+        f"(ensemble_config.json + 3 file .keras + labels.json), "
+        f"atau single model di {SINGLE_MODEL_PATH}."
+    )
 
 def preprocess_image(image: Image.Image) -> np.ndarray:
     rgb_image = image.convert("RGB")
@@ -196,50 +226,57 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
         )
 
     batch = preprocess_image(image)
-    if artifacts["mode"] == "two-stage":
-        binary_model = artifacts["binary_model"]
-        disease_model = artifacts["disease_model"]
-        binary_labels = artifacts["binary_labels"]
-        disease_labels = artifacts["disease_labels"]
-        healthy_class = artifacts["healthy_class"]
-        diseased_label = artifacts["diseased_label"]
 
-        binary_predictions = binary_model.predict(batch, verbose=0)[0]
-        disease_predictions = disease_model.predict(batch, verbose=0)[0]
-        binary_lookup = {label: index for index, label in enumerate(binary_labels)}
-        healthy_probability = float(binary_predictions[binary_lookup[healthy_class]])
-        diseased_probability = float(binary_predictions[binary_lookup[diseased_label]])
-        disease_index = int(np.argmax(disease_predictions))
-        disease_probability = float(disease_predictions[disease_index])
-        predicted_label = healthy_class if healthy_probability >= diseased_probability else disease_labels[disease_index]
-        top_indices = np.argsort(disease_predictions)[::-1][:3]
-        final_confidence = (
-            healthy_probability
-            if predicted_label == healthy_class
-            else diseased_probability * disease_probability
-        )
-        # Lapis kedua: model pisang sangat tidak yakin DAN non_plant_score cukup tinggi -> blokir.
+    # === Mode Ensemble: Soft Voting dari 3 model ===
+    if artifacts["mode"] == "ensemble":
+        models = artifacts["models"]
+        labels = artifacts["all_labels"]
+
+        # Prediksi dari masing-masing model
+        predictions = [model.predict(batch, verbose=0)[0] for model in models]
+
+        # Soft Voting: rata-rata probabilitas
+        ensemble_pred = np.mean(predictions, axis=0)
+
+        best_index = int(np.argmax(ensemble_pred))
+        best_confidence = float(ensemble_pred[best_index])
+        top_indices = np.argsort(ensemble_pred)[::-1][:3]
+
+        # Lapis kedua OOD: confidence rendah + non_plant_score tinggi -> blokir
         if (
             non_plant_score is not None
-            and final_confidence < OOD_MIN_CONFIDENCE
+            and best_confidence < OOD_MIN_CONFIDENCE
             and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
         ):
             return _not_banana_payload(
-                reason=f"low confidence {final_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
+                reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
                 non_plant_score=non_plant_score,
-                confidence=final_confidence,
+                confidence=best_confidence,
             )
+
+        # Per-model detail (opsional, untuk debugging/UI)
+        per_model = {}
+        model_names = artifacts.get("model_names", [f"model_{i}" for i in range(len(models))])
+        for name, pred in zip(model_names, predictions):
+            idx = int(np.argmax(pred))
+            per_model[name] = {
+                "label": labels[idx],
+                "confidence": float(pred[idx]),
+            }
+
         return {
-            "label": predicted_label,
-            "confidence": final_confidence,
-            "top_predictions": [(disease_labels[index], float(disease_predictions[index])) for index in top_indices],
-            "healthy_probability": healthy_probability,
-            "diseased_probability": diseased_probability,
+            "label": labels[best_index],
+            "confidence": best_confidence,
+            "top_predictions": [(labels[index], float(ensemble_pred[index])) for index in top_indices],
+            "healthy_probability": float(ensemble_pred[labels.index("Augmented Banana Healthy Leaf")]) if "Augmented Banana Healthy Leaf" in labels else None,
+            "diseased_probability": None,
             "is_banana_leaf": True,
             "ood_non_plant_score": non_plant_score,
-            "mode": "two-stage",
+            "per_model": per_model,
+            "mode": "ensemble",
         }
 
+    # === Fallback: Single model ===
     model = artifacts["model"]
     labels = artifacts["all_labels"]
     predictions = model.predict(batch, verbose=0)[0]
