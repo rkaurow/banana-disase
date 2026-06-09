@@ -25,7 +25,7 @@ NOT_BANANA_LABEL = "Not Banana Leaf"
 #
 # OOD_NON_PLANT_BLOCK: jika total skor kelas "jelas bukan tumbuhan" >= nilai ini -> blokir.
 # OOD_MIN_CONFIDENCE: jika model pisang sangat tidak yakin DAN skor non-plant cukup tinggi -> blokir.
-OOD_NON_PLANT_BLOCK = 0.60   # Harus sangat yakin bukan tumbuhan sebelum blokir
+OOD_NON_PLANT_BLOCK = 0.40   # Ambang diturunkan agar lebih agresif memblokir non-daun
 OOD_MIN_CONFIDENCE  = 0.30   # Confidence minimum model pisang (pelengkap, bukan penentu utama)
 
 # Kata kunci kelas ImageNet yang JELAS bukan tumbuhan/alam.
@@ -47,9 +47,14 @@ _NON_PLANT_KEYWORDS = (
     # Makanan olahan / non-natural
     "pizza", "burger", "hot dog", "sandwich", "ice cream", "cake", "bread",
     "noodle", "sushi", "taco", "burrito",
-    # Furnitur & bangunan
-    "chair", "table", "desk", "sofa", "bed", "door", "window", "wall", "floor",
-    "building", "house", "tower", "bridge",
+    # Screenshot, UI, Tulisan, & Kertas
+    "web site", "website", "menu", "comic", "book", "puzzle", "envelope", 
+    "paper", "text", "clock", "watch", "sign", "digital", "screen",
+    # Furnitur & bangunan & benda mati acak (sering muncul di gambar gelap/abstrak)
+    "desk", "chair", "bed", "table", "wall", "window", "door", "room",
+    "building", "house", "street", "road", "bridge", "spotlight", "matchstick", 
+    "screw", "nail", "candle", "stopwatch", "curtain", "shade", "lighter", 
+    "odometer", "chain", "perfume", "bubble",
 )
 
 _ood_backbone: tf.keras.Model | None = None
@@ -82,6 +87,14 @@ def _imagenet_non_plant_score(image: Image.Image) -> float | None:
     arr = np.expand_dims(arr, axis=0)
     preds = model.predict(arr, verbose=0)
     decoded = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=20)[0]
+    
+    # Deteksi gambar abstrak/gelap (hallucination check)
+    # Jika top-1 probability sangat rendah (< 15%), model sangat kebingungan.
+    # Ini biasanya terjadi pada gambar abstrak, hitam pekat, atau screenshot IDE.
+    top1_prob = float(decoded[0][2])
+    if top1_prob < 0.15:
+        return 1.0  # Paksa blokir sebagai OOD karena gambar tidak wajar
+
     score = 0.0
     for _, name, prob in decoded:
         n = name.lower()
@@ -235,8 +248,24 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
         # Prediksi dari masing-masing model
         predictions = [model.predict(batch, verbose=0)[0] for model in models]
 
-        # Soft Voting: rata-rata probabilitas
-        ensemble_pred = np.mean(predictions, axis=0)
+        # Ambil bobot akurasi dari config (jika tersedia)
+        config_acc = artifacts.get("config", {}).get("accuracy", {})
+        weights = []
+        for name in artifacts["model_names"]:
+            if "CNN" in name: w = config_acc.get("cnn", 1.0)
+            elif "ResNet" in name: w = config_acc.get("resnet", 1.0)
+            elif "Inception" in name: w = config_acc.get("inception", 1.0)
+            else: w = 1.0
+            # Gunakan akurasi kuadrat untuk memberi penalti lebih besar pada model jelek
+            weights.append(w ** 2)
+            
+        weights = np.array(weights)
+        weights = weights / np.sum(weights)
+
+        # Weighted Soft Voting
+        ensemble_pred = np.zeros_like(predictions[0])
+        for pred, w in zip(predictions, weights):
+            ensemble_pred += pred * w
 
         best_index = int(np.argmax(ensemble_pred))
         best_confidence = float(ensemble_pred[best_index])
