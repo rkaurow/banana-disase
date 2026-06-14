@@ -28,6 +28,13 @@ NOT_BANANA_LABEL = "Not Banana Leaf"
 OOD_NON_PLANT_BLOCK = 0.40   # Ambang diturunkan agar lebih agresif memblokir non-daun
 OOD_MIN_CONFIDENCE  = 0.30   # Confidence minimum model pisang (pelengkap, bukan penentu utama)
 
+# Stopgap OOD berbasis KETIDAKSEPAKATAN antar-model (khusus mode ensemble).
+# Input di luar distribusi (mis. foto tangan) sering membuat tiap model SANGAT yakin
+# tetapi ke kelas BERBEDA, sedangkan daun pisang asli yang jelas membuat ketiga model
+# kompak. Jika model tidak sepakat DAN skor non-plant sudah menengah (di bawah ambang
+# blokir utama tapi tidak sepele), perlakukan sebagai "bukan daun pisang".
+OOD_DISAGREE_NON_PLANT = 0.30  # skor non-plant minimum untuk mengaktifkan aturan disagreement
+
 # Kata kunci kelas ImageNet yang JELAS bukan tumbuhan/alam.
 # Gambar dengan top-K ImageNet didominasi kelas ini -> blokir.
 _NON_PLANT_KEYWORDS = (
@@ -289,7 +296,7 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
                 confidence=best_confidence,
             )
 
-        # Per-model detail (opsional, untuk debugging/UI)
+        # Per-model detail (untuk sinyal ketidaksepakatan + debugging/UI)
         per_model = {}
         model_names = artifacts.get("model_names", [f"model_{i}" for i in range(len(models))])
         for name, pred in zip(model_names, predictions):
@@ -298,6 +305,26 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
                 "label": labels[idx],
                 "confidence": float(pred[idx]),
             }
+        per_model_top_labels = [v["label"] for v in per_model.values()]
+        models_disagree = len(set(per_model_top_labels)) > 1
+
+        # Lapis ketiga OOD: model saling TIDAK SEPAKAT + skor non-plant menengah.
+        # Penanda kuat input bukan daun pisang (mis. tangan) yang dipaksa diklasifikasi:
+        # tiap model percaya diri tapi ke kelas berbeda. Daun asli yang jelas biasanya
+        # membuat ketiga model kompak sehingga aturan ini tidak aktif.
+        if (
+            non_plant_score is not None
+            and non_plant_score >= OOD_DISAGREE_NON_PLANT
+            and models_disagree
+        ):
+            return _not_banana_payload(
+                reason=(
+                    f"model disagreement {per_model_top_labels} + "
+                    f"non_plant_score {non_plant_score:.2f}"
+                ),
+                non_plant_score=non_plant_score,
+                confidence=best_confidence,
+            )
 
         return {
             "label": labels[best_index],
