@@ -129,6 +129,12 @@ DISEASE_INFO = {
         "info": "Penyakit virus yang menyebabkan pola mosaik pada seludang bunga dan daun, ditularkan oleh kutu daun (aphid). Dapat menurunkan kualitas buah.",
         "treatment": "Musnahkan tanaman terinfeksi, kendalikan vektor kutu daun, gunakan bibit bebas virus, dan jaga kebersihan alat pertanian.",
     },
+    "Augmented Banana Cordana Disease": {
+        "status": "Terdeteksi Cordana (Bercak Daun Cordana)",
+        "severity": "Sedang",
+        "info": "Penyakit jamur (Cordana musae) yang menyebabkan bercak oval cokelat keabuan dengan tepi kuning pada daun. Umumnya tidak mematikan tetapi mengurangi luas fotosintesis bila menyebar luas.",
+        "treatment": "Pangkas dan musnahkan daun terinfeksi, jaga sirkulasi udara dan drainase, hindari kelembapan berlebih, dan aplikasikan fungisida protektif (Mancozeb/tembaga) bila serangan meluas.",
+    },
     "Augmented Banana Healthy Leaf": {
         "status": "Daun Terlihat Sehat",
         "severity": "Rendah",

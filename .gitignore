@@ -112,3 +112,7 @@ kaggle.json
 artifacts.bak/
 artifacts_download.zip
 
+# Lampiran kode (generated, besar) — tidak perlu di-commit
+docs/LAMPIRAN_KODE.md
+docs/LAMPIRAN_KODE.rtf
+
