@@ -13,7 +13,7 @@ except ModuleNotFoundError:
 
 SUMOPOD_API_KEY_ENV = "SUMOPOD_API_KEY"
 DEFAULT_BASE_URL = "https://ai.sumopod.com/v1"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-4.1-mini"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HEALTHY_LABEL = "Augmented Banana Healthy Leaf"
 
