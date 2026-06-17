@@ -208,6 +208,12 @@ if (fileInput) {
 function handleFile(file) {
     if (!file.type.startsWith('image/')) return;
     currentFile = file;
+    currentPredictionContext = null;
+    chatMessages = [];
+    if (resultsContainer) resultsContainer.classList.add('hidden');
+    if (detectPlaceholder) detectPlaceholder.classList.remove('hidden');
+    if (chatWindow) chatWindow.innerHTML = '';
+
     const reader = new FileReader();
     reader.onload = (e) => {
         if (previewImage) {
@@ -314,8 +320,11 @@ function displayResults(data) {
     chatMessages = [];
     if (chatWindow) {
         chatWindow.innerHTML = '';
-        // Insert welcome greeting bubble
-        addChatMessage('assistant', `Halo! Hasil analisa menunjukkan daun pisang mengidap **${data.label}**. Ada yang ingin ditanyakan lebih lanjut mengenai hasil ini?`);
+        const isBananaLeaf = data.is_banana_leaf !== false;
+        const greeting = isBananaLeaf
+            ? `Halo! Hasil analisa menunjukkan daun pisang mengidap **${data.label}**. Ada yang ingin ditanyakan lebih lanjut mengenai hasil ini?`
+            : `Gambar ini terdeteksi sebagai **${data.label}**, jadi sistem tidak menampilkan diagnosis penyakit daun pisang. Silakan unggah foto daun pisang yang lebih jelas.`;
+        addChatMessage('assistant', greeting);
     }
 }
 

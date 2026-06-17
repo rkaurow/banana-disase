@@ -28,12 +28,28 @@ NOT_BANANA_LABEL = "Not Banana Leaf"
 OOD_NON_PLANT_BLOCK = 0.40   # Ambang diturunkan agar lebih agresif memblokir non-daun
 OOD_MIN_CONFIDENCE  = 0.30   # Confidence minimum model pisang (pelengkap, bukan penentu utama)
 
+# Keputusan penyakit dengan confidence rendah lebih baik ditolak daripada dipaksa
+# menjadi diagnosis. Kasus daun non-pisang sering muncul sebagai kelas penyakit
+# dengan confidence sekitar 50-60%.
+BANANA_DECISION_MIN_CONFIDENCE = 0.65
+NOT_BANANA_REVIEW_CONFIDENCE = 0.30
+NOT_BANANA_CLOSE_MARGIN = 0.20
+
 # Stopgap OOD berbasis KETIDAKSEPAKATAN antar-model (khusus mode ensemble).
 # Input di luar distribusi (mis. foto tangan) sering membuat tiap model SANGAT yakin
 # tetapi ke kelas BERBEDA, sedangkan daun pisang asli yang jelas membuat ketiga model
 # kompak. Jika model tidak sepakat DAN skor non-plant sudah menengah (di bawah ambang
 # blokir utama tapi tidak sepele), perlakukan sebagai "bukan daun pisang".
-OOD_DISAGREE_NON_PLANT = 0.30  # skor non-plant minimum untuk mengaktifkan aturan disagreement
+OOD_DISAGREE_NON_PLANT = 0.30  # skor non-plant minimum untuk mengaktifkan aturan disagreement (parsial)
+
+# OOD berbasis KETIDAKSEPAKATAN PENUH antar-model.
+# Kasus daun NON-pisang yang tetap "tumbuhan" (mis. daun pepaya, singkong) tidak terdeteksi
+# oleh _imagenet_non_plant_score (skornya rendah karena memang tumbuhan), sehingga lolos
+# aturan disagreement parsial yang masih bergantung pada non_plant_score.
+# Namun input semacam ini membuat ketiga model menebak ke kelas yang BERBEDA SEMUA
+# (mis. CNN->Sigatoka, ResNet->Insect Pest, Inception->Moko). Daun pisang asli yang jelas
+# membuat model cenderung sepakat. Jika SEMUA model menunjuk kelas berbeda -> tolak,
+# tanpa bergantung pada non_plant_score.
 
 # Kata kunci kelas ImageNet yang JELAS bukan tumbuhan/alam.
 # Gambar dengan top-K ImageNet didominasi kelas ini -> blokir.
@@ -110,16 +126,23 @@ def _imagenet_non_plant_score(image: Image.Image) -> float | None:
     return score
 
 
-def _not_banana_payload(reason: str, non_plant_score: float | None, confidence: float | None) -> dict[str, object]:
+def _not_banana_payload(
+    reason: str,
+    non_plant_score: float | None,
+    confidence: float | None,
+    top_predictions: list[tuple[str, float]] | None = None,
+    per_model: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "label": NOT_BANANA_LABEL,
         "confidence": float(confidence) if confidence is not None else 0.0,
-        "top_predictions": [],
+        "top_predictions": top_predictions or [],
         "healthy_probability": None,
         "diseased_probability": None,
         "is_banana_leaf": False,
         "ood_reason": reason,
         "ood_non_plant_score": non_plant_score,
+        "per_model": per_model,
         "mode": "ood",
     }
 
@@ -283,18 +306,11 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
         best_index = int(np.argmax(ensemble_pred))
         best_confidence = float(ensemble_pred[best_index])
         top_indices = np.argsort(ensemble_pred)[::-1][:3]
-
-        # Lapis kedua OOD: confidence rendah + non_plant_score tinggi -> blokir
-        if (
-            non_plant_score is not None
-            and best_confidence < OOD_MIN_CONFIDENCE
-            and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
-        ):
-            return _not_banana_payload(
-                reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
-                non_plant_score=non_plant_score,
-                confidence=best_confidence,
-            )
+        best_label = labels[best_index]
+        top_predictions = [(labels[index], float(ensemble_pred[index])) for index in top_indices]
+        not_banana_confidence = 0.0
+        if NOT_BANANA_LABEL in labels:
+            not_banana_confidence = float(ensemble_pred[labels.index(NOT_BANANA_LABEL)])
 
         # Per-model detail (untuk sinyal ketidaksepakatan + debugging/UI)
         per_model = {}
@@ -307,8 +323,79 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
             }
         per_model_top_labels = [v["label"] for v in per_model.values()]
         models_disagree = len(set(per_model_top_labels)) > 1
+        # Full disagreement: SEMUA model menunjuk kelas berbeda (mis. 3 model -> 3 kelas).
+        models_fully_disagree = (
+            len(per_model_top_labels) >= 3
+            and len(set(per_model_top_labels)) == len(per_model_top_labels)
+        )
 
-        # Lapis ketiga OOD: model saling TIDAK SEPAKAT + skor non-plant menengah.
+        if best_label == NOT_BANANA_LABEL:
+            return _not_banana_payload(
+                reason=f"negative class won with confidence {best_confidence:.2f}",
+                non_plant_score=non_plant_score,
+                confidence=best_confidence,
+                top_predictions=top_predictions,
+                per_model=per_model,
+            )
+
+        if (
+            not_banana_confidence >= NOT_BANANA_REVIEW_CONFIDENCE
+            and (
+                best_confidence < BANANA_DECISION_MIN_CONFIDENCE
+                or best_confidence - not_banana_confidence <= NOT_BANANA_CLOSE_MARGIN
+            )
+        ):
+            return _not_banana_payload(
+                reason=(
+                    f"negative class close: {not_banana_confidence:.2f}, "
+                    f"best {best_label} {best_confidence:.2f}"
+                ),
+                non_plant_score=non_plant_score,
+                confidence=max(best_confidence, not_banana_confidence),
+                top_predictions=top_predictions,
+                per_model=per_model,
+            )
+
+        if best_confidence < BANANA_DECISION_MIN_CONFIDENCE:
+            return _not_banana_payload(
+                reason=(
+                    f"low disease confidence {best_confidence:.2f} "
+                    f"< {BANANA_DECISION_MIN_CONFIDENCE}"
+                ),
+                non_plant_score=non_plant_score,
+                confidence=best_confidence,
+                top_predictions=top_predictions,
+                per_model=per_model,
+            )
+
+        # Lapis kedua OOD: confidence rendah + non_plant_score tinggi -> blokir
+        if (
+            non_plant_score is not None
+            and best_confidence < OOD_MIN_CONFIDENCE
+            and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
+        ):
+            return _not_banana_payload(
+                reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
+                non_plant_score=non_plant_score,
+                confidence=best_confidence,
+                top_predictions=top_predictions,
+                per_model=per_model,
+            )
+
+        # Lapis ketiga-A OOD: KETIDAKSEPAKATAN PENUH antar-model.
+        # Penanda kuat input bukan daun pisang (mis. daun pepaya/tumbuhan lain) yang
+        # tidak tertangkap non_plant_score karena tetap dianggap "tumbuhan" oleh ImageNet.
+        # Tidak bergantung pada non_plant_score.
+        if models_fully_disagree:
+            return _not_banana_payload(
+                reason=f"full model disagreement {per_model_top_labels}",
+                non_plant_score=non_plant_score,
+                confidence=best_confidence,
+                top_predictions=top_predictions,
+                per_model=per_model,
+            )
+
+        # Lapis ketiga-B OOD: model saling TIDAK SEPAKAT (parsial) + skor non-plant menengah.
         # Penanda kuat input bukan daun pisang (mis. tangan) yang dipaksa diklasifikasi:
         # tiap model percaya diri tapi ke kelas berbeda. Daun asli yang jelas biasanya
         # membuat ketiga model kompak sehingga aturan ini tidak aktif.
@@ -324,12 +411,14 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
                 ),
                 non_plant_score=non_plant_score,
                 confidence=best_confidence,
+                top_predictions=top_predictions,
+                per_model=per_model,
             )
 
         return {
-            "label": labels[best_index],
+            "label": best_label,
             "confidence": best_confidence,
-            "top_predictions": [(labels[index], float(ensemble_pred[index])) for index in top_indices],
+            "top_predictions": top_predictions,
             "healthy_probability": float(ensemble_pred[labels.index("Augmented Banana Healthy Leaf")]) if "Augmented Banana Healthy Leaf" in labels else None,
             "diseased_probability": None,
             "is_banana_leaf": True,
@@ -345,6 +434,28 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
     best_index = int(np.argmax(predictions))
     top_indices = np.argsort(predictions)[::-1][:3]
     best_confidence = float(predictions[best_index])
+    best_label = labels[best_index]
+    top_predictions = [(labels[index], float(predictions[index])) for index in top_indices]
+
+    if best_label == NOT_BANANA_LABEL:
+        return _not_banana_payload(
+            reason=f"negative class won with confidence {best_confidence:.2f}",
+            non_plant_score=non_plant_score,
+            confidence=best_confidence,
+            top_predictions=top_predictions,
+        )
+
+    if best_confidence < BANANA_DECISION_MIN_CONFIDENCE:
+        return _not_banana_payload(
+            reason=(
+                f"low disease confidence {best_confidence:.2f} "
+                f"< {BANANA_DECISION_MIN_CONFIDENCE}"
+            ),
+            non_plant_score=non_plant_score,
+            confidence=best_confidence,
+            top_predictions=top_predictions,
+        )
+
     if (
         non_plant_score is not None
         and best_confidence < OOD_MIN_CONFIDENCE
@@ -354,11 +465,12 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
             reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
             non_plant_score=non_plant_score,
             confidence=best_confidence,
+            top_predictions=top_predictions,
         )
     return {
-        "label": labels[best_index],
+        "label": best_label,
         "confidence": best_confidence,
-        "top_predictions": [(labels[index], float(predictions[index])) for index in top_indices],
+        "top_predictions": top_predictions,
         "healthy_probability": None,
         "diseased_probability": None,
         "is_banana_leaf": True,
