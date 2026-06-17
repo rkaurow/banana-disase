@@ -1,0 +1,23 @@
+{
+  "pipeline": "two_stage",
+  "model": "banana_gate.keras",
+  "input_size": 224,
+  "labels": [
+    "Not Banana Leaf",
+    "Banana Leaf"
+  ],
+  "banana_label": "Banana Leaf",
+  "banana_index": 1,
+  "banana_threshold": 0.65,
+  "manual_override_reason": "Lowered from validation threshold 0.75 to reduce false negatives on damaged banana leaves.",
+  "default_threshold": 0.8,
+  "target_not_banana_recall": 0.98,
+  "target_banana_recall": 0.95,
+  "validation_metrics": {
+    "threshold": 0.75,
+    "banana_recall": 0.985,
+    "not_banana_recall": 1.0,
+    "balanced_accuracy": 0.9924999999999999
+  },
+  "warning": null
+}

@@ -1,12 +1,14 @@
 {
+  "pipeline": "two_stage",
+  "banana_gate": {
+    "config": "banana_gate_config.json",
+    "model": "banana_gate.keras",
+    "banana_threshold": 0.65
+  },
   "models": [
     {
       "name": "Custom CNN",
       "file": "model_cnn.keras"
-    },
-    {
-      "name": "ResNet50",
-      "file": "model_resnet.keras"
     },
     {
       "name": "InceptionV3",
@@ -14,11 +16,10 @@
     }
   ],
   "input_size": 224,
-  "num_classes": 9,
+  "num_classes": 8,
   "voting": "soft",
   "accuracy": {
     "cnn": 0.6312849162011173,
-    "resnet": 0.6075418994413407,
     "inception": 0.9594972067039106,
     "ensemble": 0.9511173184357542
   }

@@ -1,4 +1,4 @@
-"""Siapkan folder `datasets/` 9-kelas: 8 kelas pisang + 1 kelas negatif "Not Banana Leaf".
+"""Siapkan folder `datasets/` two-stage: 8 kelas pisang + 1 kelas negatif "Not Banana Leaf".
 
 Latar belakang:
     Saat sidang, sistem salah membaca daun pepaya, daun kelapa, daun lain, lantai,
@@ -9,15 +9,17 @@ Latar belakang:
 Yang dilakukan script ini:
     1. Download dataset pisang dari Kaggle -> susun 8 folder kelas "Augmented Banana ...".
     2. Download beberapa dataset negatif (daun lain + bukan-daun) -> sampling SEIMBANG
-       ke satu folder "Not Banana Leaf" (ukurannya ~= rata-rata satu kelas pisang,
-       supaya tidak membanjiri).
-    3. Cetak ringkasan jumlah gambar per kelas.
+       ke satu folder "Not Banana Leaf" (default 4000 gambar).
+    3. Tambahkan semua gambar di hard_negatives/ (contoh gagal nyata: tangan, laptop,
+       screenshot, daun non-pisang) ke kelas negatif.
+    4. Cetak ringkasan jumlah gambar per kelas.
 
 Prasyarat:
     - kaggle CLI terpasang & kredensial di ~/.kaggle/kaggle.json (sudah ada di mesin ini).
     - Jalankan dari root repo:  python prepare_datasets.py
     - Opsi:  --neg-only (lewati pisang),  --no-download (pakai staging yang sudah ada),
-             --neg-total N (paksa jumlah gambar negatif).
+             --neg-total N (paksa jumlah gambar negatif dari Kaggle; hard_negatives
+             selalu ditambahkan di luar kuota).
 
 Catatan transparansi (BUKAN seluruh isi dataset dipakai):
     - PlantVillage (4.4GB, 3 salinan redundan) sengaja TIDAK dipakai; diganti PlantDoc
@@ -39,6 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DATASETS = ROOT / "datasets"
 STAGING = ROOT / ".dataset_staging"           # area unduh sementara (boleh dihapus)
+HARD_NEGATIVES = ROOT / "hard_negatives"      # contoh gagal nyata, lokal-only
 SEED = 42
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -64,23 +67,22 @@ BANANA_SOURCES = {
 }
 
 # Sumber NEGATIF. `weight` = proporsi kuota negatif yang diambil dari sumber ini.
-# Dikelompokkan agar negatif mewakili SEMUA yang diuji penguji:
-#   daun lain (pepaya, kelapa, multi-spesies) + bukan-daun (tangan, objek, scene/lantai).
+# Dikelompokkan agar negatif fokus ke bahan uji utama:
+#   daun pepaya + daun kelapa dominan, sumber lain hanya pendukung agar gate tetap umum.
 NEG_SOURCES = [
-    # --- Daun non-pisang (HARD NEGATIVE, porsi terbesar ~55%) ---
-    {"slug": "ajithdari/papaya-leaf-disease-dataset",                    "weight": 0.18, "group": "daun-pepaya"},
-    {"slug": "shravanatirtha/coconut-leaf-dataset-for-pest-identification", "weight": 0.15, "group": "daun-kelapa"},
-    {"slug": "nirmalsankalana/plantdoc-dataset",                        "weight": 0.22, "group": "daun-multispesies"},
-    # --- Bukan daun: tangan/telapak (penguji uji tangan & kaki) ~15% ---
-    {"slug": "shyambhu/hands-and-palm-images-dataset",                  "weight": 0.15, "group": "tangan"},
-    # --- Bukan daun: objek/orang/hewan acak (person, car, dll) ~20% ---
-    {"slug": "prasunroy/natural-images",                                "weight": 0.20, "group": "objek-acak"},
-    # --- Bukan daun: scene/lantai dalam ruangan ~10% (BESAR 2.5GB; aktifkan bila perlu) ---
-    {"slug": "itsahmad/indoor-scenes-cvpr-2019",                        "weight": 0.10, "group": "scene-lantai",
-     "enabled": False},
+    # --- Daun non-pisang utama untuk pengujian (~70%) ---
+    {"slug": "ajithdari/papaya-leaf-disease-dataset",                    "weight": 0.35, "group": "daun-pepaya"},
+    {"slug": "shravanatirtha/coconut-leaf-dataset-for-pest-identification", "weight": 0.35, "group": "daun-kelapa"},
+    # --- Daun non-pisang tambahan agar gate tidak hafal hanya 2 spesies (~10%) ---
+    {"slug": "nirmalsankalana/plantdoc-dataset",                        "weight": 0.10, "group": "daun-multispesies"},
+    # --- Bukan daun pendukung: tangan/objek/scene (~20%) ---
+    {"slug": "shyambhu/hands-and-palm-images-dataset",                  "weight": 0.08, "group": "tangan"},
+    {"slug": "prasunroy/natural-images",                                "weight": 0.07, "group": "objek-acak"},
+    {"slug": "itsahmad/indoor-scenes-cvpr-2019",                        "weight": 0.05, "group": "scene-lantai",
+     "enabled": True},
 ]
 
-DEFAULT_NEG_TOTAL = None  # None = otomatis (~= rata-rata jumlah gambar per kelas pisang)
+DEFAULT_NEG_TOTAL = 4000
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +216,15 @@ def build_negative(neg_total: int, no_download: bool) -> int:
         n = copy_sample(imgs, quota, dest, prefix=s["group"], rng=rng)
         print(f"  [{s['group']:18s}] tersedia {len(imgs):5d} -> diambil {n} (kuota {quota})")
         grand_total += n
+
+    hard_imgs = list_images(HARD_NEGATIVES) if HARD_NEGATIVES.exists() else []
+    if hard_imgs:
+        rng = random.Random(SEED + 9999)
+        n = copy_sample(hard_imgs, len(hard_imgs), dest, prefix="hardnegative", rng=rng)
+        print(f"  [{'hard-negatives':18s}] tersedia {len(hard_imgs):5d} -> ditambahkan {n} (di luar kuota)")
+        grand_total += n
+    else:
+        print(f"  [hard-negatives   ] tidak ada gambar di {HARD_NEGATIVES} (opsional)")
     print(f"  TOTAL negatif: {grand_total} gambar")
     return grand_total
 
@@ -222,11 +233,11 @@ def build_negative(neg_total: int, no_download: bool) -> int:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Siapkan datasets/ 9-kelas (pisang + Not Banana Leaf)")
+    ap = argparse.ArgumentParser(description="Siapkan datasets/ untuk pipeline two-stage")
     ap.add_argument("--neg-only", action="store_true", help="lewati tahap pisang")
     ap.add_argument("--no-download", action="store_true", help="pakai staging yang sudah ada")
     ap.add_argument("--neg-total", type=int, default=DEFAULT_NEG_TOTAL,
-                    help="jumlah gambar negatif (default: ~rata-rata 1 kelas pisang)")
+                    help="jumlah gambar negatif dari Kaggle (default: 4000)")
     ap.add_argument("--keep-staging", action="store_true", help="jangan hapus .dataset_staging di akhir")
     args = ap.parse_args()
 
@@ -239,10 +250,11 @@ def main() -> None:
         for label in BANANA_LABELS:
             banana_counts[label] = len(list_images(DATASETS / label))
 
-    # Tentukan target negatif: default ~= rata-rata jumlah gambar per kelas pisang.
+    # Tentukan target negatif dari Kaggle. Hard negatives lokal selalu ditambahkan
+    # di luar kuota agar contoh gagal nyata tidak terbuang.
     valid = [c for c in banana_counts.values() if c > 0]
     avg = round(sum(valid) / len(valid)) if valid else 1000
-    neg_total = args.neg_total or avg
+    neg_total = args.neg_total or DEFAULT_NEG_TOTAL or avg
     build_negative(neg_total, args.no_download)
 
     # Ringkasan
@@ -254,7 +266,7 @@ def main() -> None:
         print(f"  {label:45s} : {n}")
     print(f"  {'TOTAL':45s} : {grand}")
     print(f"\nSelesai. Folder siap di: {DATASETS}")
-    print("Langkah berikutnya: ubah NUM_CLASSES=9 di train.py lalu latih ulang ensemble.")
+    print("Langkah berikutnya: jalankan train-collabs.ipynb untuk training two-stage.")
 
     if not args.keep_staging and STAGING.exists():
         print(f"(Hapus staging manual bila perlu: rm -rf {STAGING})")

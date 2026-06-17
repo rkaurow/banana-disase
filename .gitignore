@@ -7,6 +7,8 @@ env/
 venv/
 ENV/
 /datasets
+/hard_negatives/*
+!/hard_negatives/.gitkeep
 
 # Environment variables
 .env
@@ -111,8 +113,8 @@ whatsapp-bot/auth_info/
 kaggle.json
 artifacts.bak/
 artifacts_download.zip
+artifacts.zip
 
 # Lampiran kode (generated, besar) — tidak perlu di-commit
 docs/LAMPIRAN_KODE.md
 docs/LAMPIRAN_KODE.rtf
-

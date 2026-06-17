@@ -7,9 +7,19 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 
+# Inference lokal di macOS/tensorflow-metal pernah memberi output gate yang
+# berbeda dari CPU untuk model yang sama. Pakai CPU agar keputusan gate stabil.
+try:
+    tf.config.set_visible_devices([], "GPU")
+except RuntimeError:
+    # TensorFlow sudah menginisialisasi device; lanjut dengan device yang ada.
+    pass
+
 # === Model Paths ===
 ENSEMBLE_CONFIG_PATH = Path("artifacts/ensemble_config.json")
 LABELS_PATH = Path("artifacts/labels.json")
+BANANA_GATE_MODEL_PATH = Path("artifacts/banana_gate.keras")
+BANANA_GATE_CONFIG_PATH = Path("artifacts/banana_gate_config.json")
 # Fallback single model (backward compat)
 SINGLE_MODEL_PATH = Path("artifacts/banana_disease_model.keras")
 ARTIFACTS_PATH = Path("artifacts")
@@ -17,6 +27,8 @@ IMAGE_SIZE = 224
 
 # Label khusus untuk gambar yang bukan daun pisang (mis. tangan, wajah, objek random).
 NOT_BANANA_LABEL = "Not Banana Leaf"
+BANANA_GATE_LABEL = "Banana Leaf"
+DEFAULT_BANANA_THRESHOLD = 0.80
 
 # Ambang batas untuk Out-Of-Distribution detection.
 # Strategi: BLOKIR hanya jika ada sinyal kuat "jelas bukan tumbuhan" (tangan, wajah, kendaraan, dll).
@@ -27,13 +39,17 @@ NOT_BANANA_LABEL = "Not Banana Leaf"
 # OOD_MIN_CONFIDENCE: jika model pisang sangat tidak yakin DAN skor non-plant cukup tinggi -> blokir.
 OOD_NON_PLANT_BLOCK = 0.40   # Ambang diturunkan agar lebih agresif memblokir non-daun
 OOD_MIN_CONFIDENCE  = 0.30   # Confidence minimum model pisang (pelengkap, bukan penentu utama)
+OOD_MIN_VEGETATION_RATIO = 0.12
+OOD_SKIN_RATIO_BLOCK = 0.12
+OOD_SKIN_MAX_VEGETATION_RATIO = 0.35
 
-# Keputusan penyakit dengan confidence rendah lebih baik ditolak daripada dipaksa
-# menjadi diagnosis. Kasus daun non-pisang sering muncul sebagai kelas penyakit
-# dengan confidence sekitar 50-60%.
-BANANA_DECISION_MIN_CONFIDENCE = 0.65
-NOT_BANANA_REVIEW_CONFIDENCE = 0.30
-NOT_BANANA_CLOSE_MARGIN = 0.20
+# Jangan menolak prediksi penyakit hanya karena confidence rendah: daun pisang asli
+# yang difoto di lapangan sering berada di rentang 50-60%. Kelas negatif dipakai
+# sebagai sinyal penolak hanya saat skornya menang atau sangat dekat.
+NOT_BANANA_REVIEW_CONFIDENCE = 0.35
+NOT_BANANA_CLOSE_MARGIN = 0.12
+OOD_FULL_DISAGREE_MAX_CONFIDENCE = 0.60
+OOD_FULL_DISAGREE_MIN_NEGATIVE = 0.15
 
 # Stopgap OOD berbasis KETIDAKSEPAKATAN antar-model (khusus mode ensemble).
 # Input di luar distribusi (mis. foto tangan) sering membuat tiap model SANGAT yakin
@@ -126,12 +142,64 @@ def _imagenet_non_plant_score(image: Image.Image) -> float | None:
     return score
 
 
+def _vegetation_color_ratio(image: Image.Image) -> float:
+    """Estimasi kasar porsi piksel hijau/kuning daun.
+
+    Dipakai hanya sebagai rem untuk ImageNet OOD: foto tangan/laptop boleh diblokir,
+    tetapi daun pisang rusak yang masih dominan hijau/kuning jangan langsung ditolak.
+    """
+    arr = np.asarray(image.convert("RGB").resize((224, 224)), dtype=np.float32)
+    r = arr[..., 0]
+    g = arr[..., 1]
+    b = arr[..., 2]
+
+    green = (
+        (g > 55)
+        & (g >= r * 0.88)
+        & (g >= b * 1.12)
+        & ((g - b) > 18)
+    )
+    yellow_green = (
+        (r > 85)
+        & (g > 85)
+        & (b < 130)
+        & (np.abs(r - g) < 75)
+        & ((r + g) > b * 2.2)
+    )
+    return float(np.mean(green | yellow_green))
+
+
+def _skin_color_ratio(image: Image.Image) -> float:
+    """Estimasi kasar porsi piksel warna kulit untuk menahan foto tangan."""
+    arr = np.asarray(image.convert("RGB").resize((224, 224)), dtype=np.float32)
+    r = arr[..., 0]
+    g = arr[..., 1]
+    b = arr[..., 2]
+    max_rgb = np.maximum(np.maximum(r, g), b)
+    min_rgb = np.minimum(np.minimum(r, g), b)
+    skin = (
+        (r > 95)
+        & (g > 35)
+        & (b > 20)
+        & ((max_rgb - min_rgb) > 15)
+        & (np.abs(r - g) > 15)
+        & (r > g)
+        & (r > b)
+    )
+    return float(np.mean(skin))
+
+
 def _not_banana_payload(
     reason: str,
     non_plant_score: float | None,
     confidence: float | None,
     top_predictions: list[tuple[str, float]] | None = None,
     per_model: dict[str, dict[str, object]] | None = None,
+    vegetation_ratio: float | None = None,
+    skin_ratio: float | None = None,
+    banana_probability: float | None = None,
+    banana_threshold: float | None = None,
+    mode: str = "ood",
 ) -> dict[str, object]:
     return {
         "label": NOT_BANANA_LABEL,
@@ -142,8 +210,12 @@ def _not_banana_payload(
         "is_banana_leaf": False,
         "ood_reason": reason,
         "ood_non_plant_score": non_plant_score,
+        "ood_vegetation_ratio": vegetation_ratio,
+        "ood_skin_ratio": skin_ratio,
+        "banana_probability": banana_probability,
+        "banana_threshold": banana_threshold,
         "per_model": per_model,
-        "mode": "ood",
+        "mode": mode,
     }
 
 DISEASE_INFO = {
@@ -210,7 +282,12 @@ DISEASE_INFO = {
 }
 
 def load_artifacts() -> tuple[dict[str, object] | None, str | None]:
-    """Load model artifacts. Supports ensemble (3 models) and single model fallback."""
+    """Load model artifacts.
+
+    Preferred mode is two-stage (banana gate + disease ensemble). If gate artifacts
+    are not present yet, fall back to the existing ensemble/single model so the app
+    remains usable before Colab retraining is copied back.
+    """
 
     # === Mode Ensemble: 3 model dari ensemble_config.json ===
     if ENSEMBLE_CONFIG_PATH.exists() and LABELS_PATH.exists():
@@ -227,16 +304,37 @@ def load_artifacts() -> tuple[dict[str, object] | None, str | None]:
                 models.append(tf.keras.models.load_model(model_path))
                 model_names.append(model_info["name"])
 
-            print(f"[inference] Ensemble loaded: {model_names}")
-            return {
+            artifacts: dict[str, object] = {
                 "mode": "ensemble",
                 "models": models,
                 "model_names": model_names,
                 "all_labels": all_labels,
                 "config": config,
-            }, None
+            }
+
+            if BANANA_GATE_MODEL_PATH.exists():
+                gate_config = (
+                    json.loads(BANANA_GATE_CONFIG_PATH.read_text(encoding="utf-8"))
+                    if BANANA_GATE_CONFIG_PATH.exists()
+                    else {
+                        "banana_threshold": DEFAULT_BANANA_THRESHOLD,
+                        "banana_index": 1,
+                        "labels": [NOT_BANANA_LABEL, BANANA_GATE_LABEL],
+                    }
+                )
+                artifacts["mode"] = "two-stage"
+                artifacts["banana_gate"] = tf.keras.models.load_model(BANANA_GATE_MODEL_PATH)
+                artifacts["banana_gate_config"] = gate_config
+                print(
+                    "[inference] Two-stage loaded: banana_gate + "
+                    f"disease ensemble {model_names}"
+                )
+            else:
+                print(f"[inference] Ensemble loaded: {model_names}")
+
+            return artifacts, None
         except Exception as exc:
-            return None, f"Gagal load ensemble: {exc}"
+            return None, f"Gagal load artifacts: {exc}"
 
     # === Fallback: Single model ===
     if SINGLE_MODEL_PATH.exists() and LABELS_PATH.exists():
@@ -247,8 +345,9 @@ def load_artifacts() -> tuple[dict[str, object] | None, str | None]:
         }, None
 
     return None, (
-        f"Model belum ditemukan. Letakkan model ensemble di {ARTIFACTS_PATH} "
-        f"(ensemble_config.json + 3 file .keras + labels.json), "
+        f"Model belum ditemukan. Letakkan model two-stage di {ARTIFACTS_PATH} "
+        f"(banana_gate.keras + banana_gate_config.json + ensemble_config.json + "
+        f"3 file .keras + labels.json), "
         f"atau single model di {SINGLE_MODEL_PATH}."
     )
 
@@ -260,70 +359,144 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
     image_array = np.expand_dims(image_array, axis=0)
     return image_array
 
-def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str, object]:
-    # === Stage 0: Out-Of-Distribution check ===
-    # Hanya blokir jika ImageNet sangat yakin gambar ini adalah objek NON-tumbuhan
-    # (tangan, wajah, kendaraan, elektronik, dll).
-    # TIDAK blokir hanya karena skor "plant" rendah — daun pisang dari sudut miring
-    # atau dengan background tanah sering mendapat skor plant rendah dari ImageNet.
-    non_plant_score = _imagenet_non_plant_score(image)
-    if non_plant_score is not None and non_plant_score >= OOD_NON_PLANT_BLOCK:
-        return _not_banana_payload(
-            reason=f"non_plant_score {non_plant_score:.2f} >= {OOD_NON_PLANT_BLOCK}",
-            non_plant_score=non_plant_score,
-            confidence=None,
-        )
+def _ensemble_weights(artifacts: dict[str, object]) -> np.ndarray:
+    config_acc = artifacts.get("config", {}).get("accuracy", {})
+    weights = []
+    for name in artifacts.get("model_names", []):
+        if "CNN" in name:
+            w = config_acc.get("cnn", 1.0)
+        elif "ResNet" in name:
+            w = config_acc.get("resnet", 1.0)
+        elif "Inception" in name:
+            w = config_acc.get("inception", 1.0)
+        else:
+            w = 1.0
+        weights.append(float(w) ** 2)
+    if not weights:
+        weights = [1.0] * len(artifacts["models"])
+    arr = np.asarray(weights, dtype=np.float32)
+    return arr / np.sum(arr)
 
+
+def _predict_ensemble(
+    artifacts: dict[str, object],
+    batch: np.ndarray,
+) -> tuple[np.ndarray, list[np.ndarray], dict[str, dict[str, object]]]:
+    labels = artifacts["all_labels"]
+    predictions = [model.predict(batch, verbose=0)[0] for model in artifacts["models"]]
+    weights = _ensemble_weights(artifacts)
+    ensemble_pred = np.zeros_like(predictions[0])
+    for pred, weight in zip(predictions, weights):
+        ensemble_pred += pred * weight
+
+    per_model = {}
+    model_names = artifacts.get("model_names", [f"model_{i}" for i in range(len(predictions))])
+    for name, pred in zip(model_names, predictions):
+        idx = int(np.argmax(pred))
+        per_model[name] = {
+            "label": labels[idx],
+            "confidence": float(pred[idx]),
+        }
+    return ensemble_pred, predictions, per_model
+
+
+def _banana_gate_probability(artifacts: dict[str, object], batch: np.ndarray) -> float:
+    raw = np.asarray(artifacts["banana_gate"].predict(batch, verbose=0)).reshape(-1)
+    gate_config = artifacts.get("banana_gate_config", {})
+    if raw.size == 1:
+        return float(raw[0])
+
+    banana_index = int(gate_config.get("banana_index", 1))
+    if banana_index < 0 or banana_index >= raw.size:
+        banana_index = 1 if raw.size > 1 else 0
+    return float(raw[banana_index])
+
+
+def _disease_payload(
+    labels: list[str],
+    ensemble_pred: np.ndarray,
+    per_model: dict[str, dict[str, object]],
+    mode: str,
+    banana_probability: float | None = None,
+    banana_threshold: float | None = None,
+) -> dict[str, object]:
+    best_index = int(np.argmax(ensemble_pred))
+    best_confidence = float(ensemble_pred[best_index])
+    top_indices = np.argsort(ensemble_pred)[::-1][:3]
+    return {
+        "label": labels[best_index],
+        "confidence": best_confidence,
+        "top_predictions": [(labels[index], float(ensemble_pred[index])) for index in top_indices],
+        "healthy_probability": (
+            float(ensemble_pred[labels.index("Augmented Banana Healthy Leaf")])
+            if "Augmented Banana Healthy Leaf" in labels else None
+        ),
+        "diseased_probability": None,
+        "is_banana_leaf": True,
+        "banana_probability": banana_probability,
+        "banana_threshold": banana_threshold,
+        "per_model": per_model,
+        "mode": mode,
+    }
+
+
+def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str, object]:
     batch = preprocess_image(image)
 
-    # === Mode Ensemble: Soft Voting dari 3 model ===
-    if artifacts["mode"] == "ensemble":
-        models = artifacts["models"]
+    if artifacts["mode"] == "two-stage":
+        gate_config = artifacts.get("banana_gate_config", {})
+        threshold = float(gate_config.get("banana_threshold", DEFAULT_BANANA_THRESHOLD))
+        banana_probability = _banana_gate_probability(artifacts, batch)
+
+        if banana_probability < threshold:
+            not_banana_confidence = 1.0 - banana_probability
+            return _not_banana_payload(
+                reason=(
+                    f"banana_gate probability {banana_probability:.2f} "
+                    f"< threshold {threshold:.2f}"
+                ),
+                non_plant_score=None,
+                confidence=not_banana_confidence,
+                top_predictions=[
+                    (NOT_BANANA_LABEL, not_banana_confidence),
+                    (BANANA_GATE_LABEL, banana_probability),
+                ],
+                banana_probability=banana_probability,
+                banana_threshold=threshold,
+                mode="two-stage-gate",
+            )
+
         labels = artifacts["all_labels"]
+        ensemble_pred, _, per_model = _predict_ensemble(artifacts, batch)
+        return _disease_payload(
+            labels=labels,
+            ensemble_pred=ensemble_pred,
+            per_model=per_model,
+            mode="two-stage",
+            banana_probability=banana_probability,
+            banana_threshold=threshold,
+        )
 
-        # Prediksi dari masing-masing model
-        predictions = [model.predict(batch, verbose=0)[0] for model in models]
+    # Legacy ensemble fallback: retained until two-stage artifacts are copied back.
+    if artifacts["mode"] == "ensemble":
+        labels = artifacts["all_labels"]
+        non_plant_score: float | None = None
+        vegetation_ratio: float | None = None
+        skin_ratio: float | None = None
 
-        # Ambil bobot akurasi dari config (jika tersedia)
-        config_acc = artifacts.get("config", {}).get("accuracy", {})
-        weights = []
-        for name in artifacts["model_names"]:
-            if "CNN" in name: w = config_acc.get("cnn", 1.0)
-            elif "ResNet" in name: w = config_acc.get("resnet", 1.0)
-            elif "Inception" in name: w = config_acc.get("inception", 1.0)
-            else: w = 1.0
-            # Gunakan akurasi kuadrat untuk memberi penalti lebih besar pada model jelek
-            weights.append(w ** 2)
-            
-        weights = np.array(weights)
-        weights = weights / np.sum(weights)
-
-        # Weighted Soft Voting
-        ensemble_pred = np.zeros_like(predictions[0])
-        for pred, w in zip(predictions, weights):
-            ensemble_pred += pred * w
-
+        ensemble_pred, _, per_model = _predict_ensemble(artifacts, batch)
         best_index = int(np.argmax(ensemble_pred))
+        best_label = labels[best_index]
         best_confidence = float(ensemble_pred[best_index])
         top_indices = np.argsort(ensemble_pred)[::-1][:3]
-        best_label = labels[best_index]
         top_predictions = [(labels[index], float(ensemble_pred[index])) for index in top_indices]
-        not_banana_confidence = 0.0
-        if NOT_BANANA_LABEL in labels:
-            not_banana_confidence = float(ensemble_pred[labels.index(NOT_BANANA_LABEL)])
 
-        # Per-model detail (untuk sinyal ketidaksepakatan + debugging/UI)
-        per_model = {}
-        model_names = artifacts.get("model_names", [f"model_{i}" for i in range(len(models))])
-        for name, pred in zip(model_names, predictions):
-            idx = int(np.argmax(pred))
-            per_model[name] = {
-                "label": labels[idx],
-                "confidence": float(pred[idx]),
-            }
+        not_banana_confidence = (
+            float(ensemble_pred[labels.index(NOT_BANANA_LABEL)])
+            if NOT_BANANA_LABEL in labels else 0.0
+        )
         per_model_top_labels = [v["label"] for v in per_model.values()]
         models_disagree = len(set(per_model_top_labels)) > 1
-        # Full disagreement: SEMUA model menunjuk kelas berbeda (mis. 3 model -> 3 kelas).
         models_fully_disagree = (
             len(per_model_top_labels) >= 3
             and len(set(per_model_top_labels)) == len(per_model_top_labels)
@@ -337,13 +510,9 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
                 top_predictions=top_predictions,
                 per_model=per_model,
             )
-
         if (
             not_banana_confidence >= NOT_BANANA_REVIEW_CONFIDENCE
-            and (
-                best_confidence < BANANA_DECISION_MIN_CONFIDENCE
-                or best_confidence - not_banana_confidence <= NOT_BANANA_CLOSE_MARGIN
-            )
+            and best_confidence - not_banana_confidence <= NOT_BANANA_CLOSE_MARGIN
         ):
             return _not_banana_payload(
                 reason=(
@@ -355,79 +524,77 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
                 top_predictions=top_predictions,
                 per_model=per_model,
             )
-
-        if best_confidence < BANANA_DECISION_MIN_CONFIDENCE:
-            return _not_banana_payload(
-                reason=(
-                    f"low disease confidence {best_confidence:.2f} "
-                    f"< {BANANA_DECISION_MIN_CONFIDENCE}"
-                ),
-                non_plant_score=non_plant_score,
-                confidence=best_confidence,
-                top_predictions=top_predictions,
-                per_model=per_model,
-            )
-
-        # Lapis kedua OOD: confidence rendah + non_plant_score tinggi -> blokir
         if (
-            non_plant_score is not None
-            and best_confidence < OOD_MIN_CONFIDENCE
-            and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
+            models_fully_disagree
+            and best_confidence <= OOD_FULL_DISAGREE_MAX_CONFIDENCE
+            and not_banana_confidence >= OOD_FULL_DISAGREE_MIN_NEGATIVE
         ):
             return _not_banana_payload(
-                reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
+                reason=(
+                    "all ensemble models disagreed "
+                    f"({', '.join(per_model_top_labels)}) with best confidence "
+                    f"{best_confidence:.2f} and negative score {not_banana_confidence:.2f}"
+                ),
                 non_plant_score=non_plant_score,
-                confidence=best_confidence,
+                confidence=max(best_confidence, not_banana_confidence),
                 top_predictions=top_predictions,
                 per_model=per_model,
+                vegetation_ratio=vegetation_ratio,
+                skin_ratio=skin_ratio,
             )
 
-        # Lapis ketiga-A OOD: KETIDAKSEPAKATAN PENUH antar-model.
-        # Penanda kuat input bukan daun pisang (mis. daun pepaya/tumbuhan lain) yang
-        # tidak tertangkap non_plant_score karena tetap dianggap "tumbuhan" oleh ImageNet.
-        # Tidak bergantung pada non_plant_score.
-        if models_fully_disagree:
-            return _not_banana_payload(
-                reason=f"full model disagreement {per_model_top_labels}",
-                non_plant_score=non_plant_score,
-                confidence=best_confidence,
-                top_predictions=top_predictions,
-                per_model=per_model,
-            )
-
-        # Lapis ketiga-B OOD: model saling TIDAK SEPAKAT (parsial) + skor non-plant menengah.
-        # Penanda kuat input bukan daun pisang (mis. tangan) yang dipaksa diklasifikasi:
-        # tiap model percaya diri tapi ke kelas berbeda. Daun asli yang jelas biasanya
-        # membuat ketiga model kompak sehingga aturan ini tidak aktif.
+        non_plant_score = _imagenet_non_plant_score(image)
+        vegetation_ratio = _vegetation_color_ratio(image)
+        skin_ratio = _skin_color_ratio(image)
         if (
             non_plant_score is not None
+            and non_plant_score >= OOD_NON_PLANT_BLOCK
+            and (
+                vegetation_ratio < OOD_MIN_VEGETATION_RATIO
+                or (
+                    skin_ratio >= OOD_SKIN_RATIO_BLOCK
+                    and vegetation_ratio < OOD_SKIN_MAX_VEGETATION_RATIO
+                )
+            )
+        ):
+            return _not_banana_payload(
+                reason=(
+                    f"non_plant_score {non_plant_score:.2f} >= {OOD_NON_PLANT_BLOCK} "
+                    f"with vegetation_ratio {vegetation_ratio:.2f}, skin_ratio {skin_ratio:.2f}"
+                ),
+                non_plant_score=non_plant_score,
+                confidence=non_plant_score,
+                top_predictions=top_predictions,
+                per_model=per_model,
+                vegetation_ratio=vegetation_ratio,
+                skin_ratio=skin_ratio,
+            )
+        if (
+            models_disagree
+            and non_plant_score is not None
             and non_plant_score >= OOD_DISAGREE_NON_PLANT
-            and models_disagree
         ):
             return _not_banana_payload(
                 reason=(
-                    f"model disagreement {per_model_top_labels} + "
-                    f"non_plant_score {non_plant_score:.2f}"
+                    f"ensemble disagreed ({', '.join(per_model_top_labels)}) "
+                    f"and non_plant_score {non_plant_score:.2f} >= {OOD_DISAGREE_NON_PLANT}"
                 ),
                 non_plant_score=non_plant_score,
-                confidence=best_confidence,
+                confidence=max(best_confidence, non_plant_score, not_banana_confidence),
                 top_predictions=top_predictions,
                 per_model=per_model,
+                vegetation_ratio=vegetation_ratio,
+                skin_ratio=skin_ratio,
             )
 
-        return {
-            "label": best_label,
-            "confidence": best_confidence,
-            "top_predictions": top_predictions,
-            "healthy_probability": float(ensemble_pred[labels.index("Augmented Banana Healthy Leaf")]) if "Augmented Banana Healthy Leaf" in labels else None,
-            "diseased_probability": None,
-            "is_banana_leaf": True,
-            "ood_non_plant_score": non_plant_score,
-            "per_model": per_model,
-            "mode": "ensemble",
-        }
+        return _disease_payload(
+            labels=labels,
+            ensemble_pred=ensemble_pred,
+            per_model=per_model,
+            mode="ensemble",
+        )
 
-    # === Fallback: Single model ===
+    # Fallback: single model.
     model = artifacts["model"]
     labels = artifacts["all_labels"]
     predictions = model.predict(batch, verbose=0)[0]
@@ -436,34 +603,10 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
     best_confidence = float(predictions[best_index])
     best_label = labels[best_index]
     top_predictions = [(labels[index], float(predictions[index])) for index in top_indices]
-
     if best_label == NOT_BANANA_LABEL:
         return _not_banana_payload(
             reason=f"negative class won with confidence {best_confidence:.2f}",
-            non_plant_score=non_plant_score,
-            confidence=best_confidence,
-            top_predictions=top_predictions,
-        )
-
-    if best_confidence < BANANA_DECISION_MIN_CONFIDENCE:
-        return _not_banana_payload(
-            reason=(
-                f"low disease confidence {best_confidence:.2f} "
-                f"< {BANANA_DECISION_MIN_CONFIDENCE}"
-            ),
-            non_plant_score=non_plant_score,
-            confidence=best_confidence,
-            top_predictions=top_predictions,
-        )
-
-    if (
-        non_plant_score is not None
-        and best_confidence < OOD_MIN_CONFIDENCE
-        and non_plant_score >= OOD_NON_PLANT_BLOCK * 0.5
-    ):
-        return _not_banana_payload(
-            reason=f"low confidence {best_confidence:.2f} + non_plant_score {non_plant_score:.2f}",
-            non_plant_score=non_plant_score,
+            non_plant_score=None,
             confidence=best_confidence,
             top_predictions=top_predictions,
         )
@@ -474,6 +617,5 @@ def predict_image(artifacts: dict[str, object], image: Image.Image) -> dict[str,
         "healthy_probability": None,
         "diseased_probability": None,
         "is_banana_leaf": True,
-        "ood_non_plant_score": non_plant_score,
         "mode": "single-stage",
     }

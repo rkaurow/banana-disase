@@ -1,14 +1,14 @@
 # 🍌 Banana Doctor AI
 
-Banana Doctor AI adalah aplikasi deteksi penyakit daun pisang berbasis **Computer Vision (MobileNetV2)** dan **AI Asisten (LLM)** dengan arsitektur **FastAPI** dan **Modern Dashboard**. Aplikasi ini juga dilengkapi dengan integrasi **WhatsApp Bot** yang memungkinkan para petani melakukan diagnosa secara langsung melalui WhatsApp.
+Banana Doctor AI adalah aplikasi deteksi penyakit daun pisang berbasis **Computer Vision two-stage** dan **AI Asisten (LLM)** dengan arsitektur **FastAPI** dan **Modern Dashboard**. Aplikasi ini juga dilengkapi dengan integrasi **WhatsApp Bot** yang memungkinkan para petani melakukan diagnosa secara langsung melalui WhatsApp.
 
 ## ✨ Fitur Utama
 
-- **Deteksi Penyakit Daun Pisang Secara Real-time**: Menggunakan model MobileNetV2 untuk mengenali penyakit seperti *Cordana*, *Panama Disease*, *Yellow and Black Sigatoka*, dan daun sehat (*Healthy*).
+- **Deteksi Penyakit Daun Pisang Secara Real-time**: Menggunakan banana gate untuk memvalidasi daun pisang, lalu ensemble Custom CNN, ResNet50, dan InceptionV3 untuk mengenali *Cordana*, *Panama Disease*, *Yellow and Black Sigatoka*, hama, virus mosaik, *Moko*, dan daun sehat (*Healthy*).
 - **Dashboard Modern Premium**: UI/UX menggunakan desain *Glassmorphism* dan *Dark Mode* yang memukau dan ringan.
 - **Asisten AI Terintegrasi**: Menggunakan LLM (seperti GPT-4o-mini melalui Sumopod AI) untuk memberikan rekomendasi perawatan, tindakan pencegahan, dan produk penanganan yang spesifik.
 - **WhatsApp Bot**: Fitur bot WhatsApp cerdas yang memungkinkan pengguna untuk mengunggah foto daun langsung ke WhatsApp, menerima hasil diagnosa secara instan, dan melakukan sesi tanya jawab (chat) dengan asisten AI seputar penyakit tersebut.
-- **Pelatihan Model Dua Tahap (Two-Stage Training)**: Kemampuan melatih model menjadi sistem biner (Sehat vs Sakit) dan spesialis penyakit untuk akurasi yang lebih tinggi.
+- **Pelatihan Model Dua Tahap (Two-Stage Training)**: Tahap pertama melatih `banana_gate.keras` untuk `Banana Leaf` vs `Not Banana Leaf`; tahap kedua melatih ensemble penyakit khusus 8 kelas daun pisang.
 
 ---
 
@@ -72,18 +72,19 @@ node bot.js
 - `frontend/`: Direktori antarmuka pengguna (HTML, CSS Glassmorphism, JS Logic).
 - `whatsapp-bot/`: Service Bot WhatsApp menggunakan `@whiskeysockets/baileys`.
 - `src/`: Modul *core* (Pemuatan Model ML, Prediksi, Integrasi LLM AI).
-- `train.py` / `train_two_stage.py`: Script untuk melakukan proses pelatihan (*training*) ulang dari dataset lokal.
+- `prepare_datasets.py` / `prepare_datasets_colab.ipynb`: Penyusunan dataset pisang, dataset negatif, dan hard negatives.
+- `train-collabs.ipynb`: Notebook training two-stage untuk Colab dan ekspor artifact ke Google Drive.
 - `evaluate.py`: Script untuk evaluasi model (Confusion Matrix & Classification Report).
 - `guides.md`: Panduan lengkap penggunaan teknis dan pengembangan.
 
 ---
 
 ## 🧠 Training & Evaluasi (Opsional)
-Jika Anda memiliki dataset yang diletakkan di `datasets/`, Anda dapat melatih ulang model:
+Training utama dilakukan di Colab:
 
-1. **Single-Stage**: `python3 train.py` (satu model langsung untuk 4 kelas).
-2. **Two-Stage**: `python3 train_two_stage.py` (model *Sehat/Sakit* lalu model spesialis penyakit).
-3. **Evaluasi**: `python3 evaluate.py` (menyimpan model `.keras` ke dalam `artifacts/`).
+1. Jalankan `prepare_datasets_colab.ipynb` untuk membuat `banana_datasets_twostage.zip`.
+2. Jalankan `train-collabs.ipynb` untuk melatih `banana_gate.keras` dan ensemble penyakit 8 kelas.
+3. Salin artifact dari Google Drive ke `artifacts/`, lalu jalankan test di folder `tests/`.
 
 ---
 
